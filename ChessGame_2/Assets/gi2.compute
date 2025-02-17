@@ -1,0 +1,76 @@
+// GIComputeShader.compute
+#pragma kernel CSMain
+
+// Maximum number of point lights in the scene
+#define MAX_LIGHTS 16
+
+struct PointLight {
+    float3 position;
+    float3 color;
+    float intensityEV;
+};
+
+cbuffer Params
+{
+    float4x4 g_ProjectionMatrix;
+    float4x4 g_ViewMatrix;
+    float4x4 g_InverseViewProjectionMatrix;
+    uint     g_ResolutionX;
+    uint     g_ResolutionY;
+    uint     g_NumLights;
+    PointLight g_Lights[MAX_LIGHTS];
+};
+
+Texture2D<float4> g_AlbedoTexture;   // Scene albedo
+Texture2D<float4> g_NormalTexture;   // Scene normals
+Texture2D<float4> g_PositionTexture; // Scene world positions
+RWStructuredBuffer<float4> g_Output; // Output buffer for GI data
+
+// Function to convert EV (exposure value) to radiance
+float EVToRadiance(float EV) {
+    return pow(2.0f, EV - 4.0f);
+}
+
+// Lambertian reflection
+float3 LambertianReflection(float3 albedo, float3 lightColor, float3 lightDir, float3 normal, float radiance)
+{
+    float NdotL = max(dot(normal, lightDir), 0.0f);
+    return albedo * lightColor * radiance * NdotL;
+}
+
+[numthreads(8, 8, 1)]
+void CSMain(uint3 id : SV_DispatchThreadID)
+{
+    // Get thread coordinates
+    uint x = id.x;
+    uint y = id.y;
+
+    if (x >= g_ResolutionX || y >= g_ResolutionY)
+        return;
+
+    // Sample albedo, normal, and world position
+    float4 albedo = g_AlbedoTexture.Load(int3(x, y, 0));
+    float4 normal = g_NormalTexture.Load(int3(x, y, 0));
+    float4 position = g_PositionTexture.Load(int3(x, y, 0));
+
+    float3 finalColor = 0.0;
+
+    for (uint i = 0; i < g_NumLights; i++)
+    {
+        PointLight light = g_Lights[i];
+
+        // Convert EV to radiance
+        float radiance = EVToRadiance(light.intensityEV);
+
+        // Calculate geometry
+        float3 lightDir = normalize(light.position - position.xyz);
+        float3 lightColor = light.color;
+
+        // Diffuse using Lambertian Reflection
+        finalColor += LambertianReflection(albedo.rgb, lightColor, lightDir, normal.rgb, radiance);
+    }
+
+    // Output GI data - storing as HDR color in output buffer
+    uint index = y * g_ResolutionX + x;
+    g_Output[index] = float4(finalColor, 1.0);
+}

@@ -1,0 +1,117 @@
+#pragma kernel CSMain
+
+// Structures to represent point light properties
+struct PointLight {
+    float3 position;
+    float intensityEV; // Exposure Value
+    float3 color;
+    float padding;     // Padding for alignment
+};
+
+// G-buffer textures (input)
+Texture2D<float4> _AlbedoTexture;
+Texture2D<float4> _NormalTexture;
+Texture2D<float4> _PositionTexture;
+
+// Output buffer (GI results)
+RWStructuredBuffer<float4> _GIOutput;
+
+// Light data buffer
+StructuredBuffer<PointLight> _PointLights;
+uint _NumLights;
+
+// Parameters
+cbuffer CameraParams {
+    matrix _InverseViewMatrix;
+    uint _ResolutionX;
+    uint _ResolutionY;
+    uint _MaxBounceCount;
+    uint _SamplesPerPixel;
+};
+
+// Converts EV units to luminance (cd/m²)
+float EVToLuminance(float EV) {
+    return pow(2.0, EV - 3.0);
+}
+
+// Calculates direct lighting contribution
+float3 ComputeDirectLighting(float3 position, float3 normal) {
+    float3 totalLighting = float3(0, 0, 0);
+    
+    for (uint i = 0; i < _NumLights; i++) {
+        PointLight light = _PointLights[i];
+        float3 lightDir = light.position - position;
+        float distanceSquared = dot(lightDir, lightDir);
+        float distance = sqrt(distanceSquared);
+        
+        float3 lightDirectionNormalized = lightDir / distance;
+
+        // Lambertian diffuse
+        float NdotL = max(dot(normal, lightDirectionNormalized), 0.0);
+        if (NdotL > 0) {
+            // Luminance calculation
+            float luminance = EVToLuminance(light.intensityEV) / distanceSquared;
+
+            totalLighting += light.color * luminance * NdotL;
+        }
+    }
+    
+    return totalLighting;
+}
+
+// Simplified indirect lighting calculation (single bounce approximation)
+float3 ComputeIndirectLighting(float3 position, float3 normal) {
+    float3 accumulatedColor = float3(0, 0, 0);
+    
+    // Basic diffuse bounce simulation
+    for (uint sample = 0; sample < _SamplesPerPixel; sample++) {
+        // Generate a random diffuse direction around the normal
+        float2 randCoords = frac(sin(dot(position.xy + sample, float2(12.9898, 78.233))) * 43758.5453);
+        float z = randCoords.x;
+        float r = sqrt(1.0 - z * z);
+        float phi = 2 * 3.14159265 * randCoords.y;
+        
+        float3 sampleDir = float3(r * cos(phi), r * sin(phi), z);
+
+        // Align sample direction to normal
+        float3 tangent = normalize(cross(normal, float3(0.0, 1.0, 0.0)));
+        float3 bitangent = cross(normal, tangent);
+        float3 diffuseDirection = normalize(tangent * sampleDir.x + bitangent * sampleDir.y + normal * sampleDir.z);
+        
+        // Sample potential light contribution
+        // Simplified assumption: no occlusion, uniform environment lighting
+        float ambientStrength = 0.1; // Simple ambient term
+        accumulatedColor += ambientStrength * diffuseDirection;
+    }
+    
+    return accumulatedColor / _SamplesPerPixel;
+}
+
+// Compute shader's main
+[numthreads(8, 8, 1)]
+void CSMain(uint3 id : SV_DispatchThreadID) {
+    uint x = id.x;
+    uint y = id.y;
+
+    if (x >= _ResolutionX || y >= _ResolutionY)
+        return;
+
+    // Read G-buffer data
+    float4 albedo = _AlbedoTexture.Load(int3(x, y, 0));
+    float4 normalPacked = _NormalTexture.Load(int3(x, y, 0));
+    float3 position = _PositionTexture.Load(int3(x, y, 0)).xyz;
+
+    // Decode normal (assuming stored as normalized vector)
+    float3 normal = normalize(normalPacked.xyz * 2.0 - 1.0);
+
+    // Direct & indirect lighting
+    float3 directLight = ComputeDirectLighting(position, normal);
+    float3 indirectLight = ComputeIndirectLighting(position, normal) * albedo.rgb;
+
+    // Combine results
+    float3 finalColor = float3(255.0f, 0.0f,0.0f);//directLight * albedo.rgb + indirectLight;
+
+    // Store result in output buffer
+    uint index = y * _ResolutionX + x;
+    _GIOutput[index] = float4(finalColor, 1.0);
+}
